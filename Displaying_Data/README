@@ -1,0 +1,2 @@
+This folder contains scripts for displaying the data,
+including both bounding boxes (using vcoco-style calls) and keypoints on the same acting object.
