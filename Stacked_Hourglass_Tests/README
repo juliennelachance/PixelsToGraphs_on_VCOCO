@@ -1,0 +1,5 @@
+This folder contains the modified code necessary for testing modifications to the Stacked Hourglass architecture.
+
+In particular, we wanted to ensure that the ablation tests weren't indicative of having "more layers" between 
+the bottlenecks in the network; i.e., that we couldn't improve performance by dumping FC layers in the 
+middle of the network. Happily, the stacked hourglass net was found to outperform our tests. 
