@@ -5,5 +5,9 @@ of MS-COCO, and pick out only those images with V-COCO annotations. Additionally
 the datasets corresponding to different annotation types: those for the standard object-relation challenges (as utilized
 in Mask R-CNN, for example) and keypoint annotations for 2D human psoe estimation. 
 
-The scripts here handle all of these tasks, with the exception of picking out the "supercategory" data related to building 
-the skeletons for the keypoint task. Such annotations can be handled in post-processing if necessary. 
+The scripts here handle all of these tasks, including picking out the "supercategory" data related to building 
+the skeletons for the keypoint task. A script in the style of bearpaw's ms-coco data pre-processing script (https://github.com/bearpaw/pytorch-pose/blob/master/miscs/gen_coco.m)
+is provided, which pulls in annotation information pertaining to sit/stand actions. 
+
+All together, these scripts allow the user to translate their data from the MS-COCO and V-COCO standards, to the dataloader input 
+of the stacked hourglass style architectures. 
