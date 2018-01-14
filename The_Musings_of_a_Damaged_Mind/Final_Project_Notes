@@ -1,0 +1,278 @@
+Progress log- Pixels to Graphs for Human Pose
+
+Nov 27: Data exploration of MS-COCO (keypoints) and V-COCO. 
+	Conclusions:
+	- All V-COCO indices are contained within the MS-COCO keypoints data list. 
+	- Out of 10346 annotated v data, 
+		9767 in MS-COCO training data
+		579 in MS-COCO val data
+	- But
+		2533 indices in training data for v-coco
+		2867 in val
+		5400 in trainval (=train+val)
+		4946 indices in test 
+
+Why V-COCO? - used in "Detecting and Recognizing Human-Object Interactions" (other paper by Mask R-CNN guys at FAIR)
+
+Plan for tomorrow: 
+	Try writing dataloader in style of Mask R-CNN DataLoader. Implement for V-COCO. Try to visualize some things
+	in the style of v-coco example script. 
+
+
+Nov 29: You can't read, apparently. Data only comes from 2014 data:
+	- COCO train -> train, val split for V-COCO
+	- COCO val -> test set for V-COCO. 
+	- Currently downloading 2014 data.
+	
+	- Step 1: use script to pick annotations from COCO data. 
+	- Step 2: display some images with v-coco tools (semantic stuff). 
+	- Step 3: display some images with MS-COCO tools (pose keypoints). 
+	- Step 4: add to "ann" in Mask R-CNN loader and figure out how this meshes up with PyTorch. 
+
+
+	- 1. Can you train new pose data using stacked hourglass/associative embedding? How good is the accuracy?
+	- 2. Construct Newell's model
+	- 3. Can you train semantic info using V-COCO annotations?
+	- 4. Now, combine. Can accuracy of (1) be improved? 
+
+Dec 6th: Should be full set of examples in the final set. Is it enough? 
+
+[{u'supercategory': u'person', u'name': u'person', u'skeleton': [[16, 14], [14, 12], [17, 15], [15, 13], [12, 13], [6, 12], [7, 13], [6, 7], [6, 8], [7, 9], [8, 10], [9, 11], [2, 3], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5, 7]], u'keypoints': [u'nose', u'left_eye', u'right_eye', u'left_ear', u'right_ear', u'left_shoulder', u'right_shoulder', u'left_elbow', u'right_elbow', u'left_wrist', u'right_wrist', u'left_hip', u'right_hip', u'left_knee', u'right_knee', u'left_ankle', u'right_ankle'], u'id': 1}]
+
+
+	- Warning to self! To display keypoints later, you'll have to search for the appropriate "supercategory" data. 
+	    For now, I'll just worry about semantic stuff. Chill out- you can just reference the original dataset for these details. 
+	- Today: both datasets were successfully merged into final_merge_vcoco.json. Uploaded scripts to GitHub. 
+	- Next step: write a dataloader, as they did for Mask-RCNN. 
+		We need to pass in the correctly sized/normalized images, plus object relation data. 
+
+Dec 12th: Finally! We've figured out the data. What a mess. Can display both types of annotation together. 
+	Now:
+	- Splitting into train and test sets? Done. 
+	- Testing on Stacked Hourglass code? WOULD BE DONE but apparently I need to download MatLab here. sjfhwufh uwfiugfIWBG
+	Then: 
+	- Reading in semantic annotations, too. 
+
+
+Dec 18th. Finally put data into Stacked Hourglass format and attempted run. Training data accuracy was reported at 0.5856 (two hgs), 
+	with final loss = 0.0009. However, upon running evalutation on validation data (with existing splits), accuracy <1%! (0.0073). 
+	Are we totally overfitting? Last ditch effort will be to dump most of the image id's in the V-COCO list into training, with small
+	subset left over for validation. Primary conclusions can be:
+		1. Normal stacked hourglass results- comparison (do more runs? What about w/o residual connections? Curious)
+		2. The importance of creating mixed dataset for potential future research. Talk about consequences of other datasets like ImageNet. 
+		3. Propose new architecture, provided such data were available. 
+		4. Set up dataloader with small dataset as an example. ^ 
+	Plan for tomorrow: one more time with data splits. Don't forget to upload to GitHub! 
+
+Dec 19th: Took first 2876 test ID's to merge into new training set (80% of total examples). Resumed with splits. 
+Dec 20th: Nope, you're an idiot. 71.44% accuracy on this new split dataset. I'll bet the other one works fine... 
+		63.64% val accuracy on initial test set 
+
+	- What now? It's not possible to implement an entire RoI/Faster-RCNN type thing right now. So let's see if we can do 
+		associative-embedding type experiments with a subset of the action categories, like sit vs. stand. 
+		Now: spend some time doing data processing to make sure we have enough instances of these two. We should... 
+	- Ideally: we will get higher accuracy results for lower-body keypoints, if we force attention in this way. 
+	- For project: propose a framework for including objects in the heatmaps, as they did in Pixels To Graphs. 
+	- Let's implement this as a sitting heatmap and a standing heatmap. Loss function should encourage keypoints to lie in same 			map, just as associative embeddings for multiperson pose encourage keypoints to lie with same person map.
+
+ 
+Dec 21st: Following data reduction to sit/stand cases, we have:
+	- 6279 training images
+	- 1523 test images, and:
+
+	- 10154 annotations in train, 3134 of which are sit
+	- 2467 annotations in test, 771 of which are sit 
+
+	Step 0. Wait for current hourglass run to terminate. SO SLOW without residual connections!! Currently only 54% acc
+	Step 1. gen_coco process this data without sit/stand data, for initial test (can we even train on this?)
+	Step 2. Add sitstand field to gen_coco and figure out how to impose loss on TWO heatmaps, instead. 
+		Can an improvement be made? 
+
+	Step 3. Do additional stacked hourglass tests if time permits. 
+
+	- 62.95% training accuracy on 2-hg no-residual net. Took two days! 
+	- Validation: Loss 0.0005, accuracy 62.96 
+
+Model,  Head,   Shoulder, Elbow,  Wrist,   Hip ,     Knee  , Ankle ,  Mean
+hg2   93.52  89.40     70.58  44.66   77.86   58.47   53.50   69.89
+
+Dec 22nd: - Sitstand data with normal annotations alone got 65.56% train accuracy, loss 0.0009
+		- Validation accuracy: 70.16% 
+	- Later: will re-read "associative embeddings" paper to make sure I'm designing the FC portion correctly. 
+	- For now: started a run with non-residual hourglass layers, with 10 FC layers in between. 
+		Perhaps we'll at least get an improvement on this? Orig hypothesis more appropriate here. 
+		But it will take days to train. May need to stop and resume :/ 
+		Can also take advantage of christmas days to do 8-stack non-residual run. We shall see. 
+		Could also make FC layers residual, in later tests. 
+
+Dec 23rd: - Network with original sit/stand data (stacked hourglass alone) is still training. Why so slow?
+	- At least, I understamd the associative embedding loss functions now, and am ready to set new net up when possible. 
+	- MSE + tag loss = difference between *tag* ints at each pixel location. 
+		For us, will have only tags 0 and 1 (after sigmoid fns). 
+
+Dec 25th: Back. 2 hourglasses (nores) + 10FC layers (MPII): training accuracy: 63.40%. Loss: 0.0047 
+	- Validation acc: 65.30%  Loss:  0.0033
+	- eval PCK stats:
+Model,  Head,   Shoulder, Elbow,  Wrist,   Hip ,     Knee  , Ankle ,  Mean
+hg2_fcs   93.42  89.03     72.05  63.24   77.96   57.89   52.48   72.38
+
+	Modified files:
+		pose/datasets/mscoco.py: Output heatmaps ("target") now need sit/stand maps 
+		pose/imutils: for creating embedding target maps 
+		mscoco.py: train and val code 
+		pose/models/hourglass.py: add sigmoid, FC layers 
+	Try to run for 2 hg's (for consistency w/ above). 
+	- Training. For validation accuracy will need to modify calc_dists to take every OTHER second-dim index (::2) 
+
+Dec. 26th: - For initial sitstand test: training loss = 0.0013 (MSE for everything), need to check val w real accuracy metric.... "75.11"
+	- Now: re-writing validation code for better acc. assessment. 
+	- After: do another test with FC layers on sitstand reduced data (without embeddings). Need rough comparison.
+	- After that: need to do 8-stack test with FC layers in between for old analysis project.
+		Also: Try a four-stack version of this one? How good can it get without embeddings? Do they actually help like this?
+		Later still: keep embeddings in the middle, and let future hourglass stacks refine on this. 
+		Note: 'embeddings' might not be the best word...
+	- Email profs to see if this is ok - done 
+
+	- Sitstand val acc: 68.54%, loss = 0.0013 
+		accuracy of embeddings alone: 67.86% 
+	- Sitstand val acc (orig data, similar net): 70.94%, loss = 0.0013 
+	- Now: really have to figure out this post-processing. 
+		-  M = csvread('acc_values_origdata.txt')
+		-  mean(M(:,1:17))
+Columns 1 through 14
+
+    0.8198    0.9523    0.9283    0.8872    0.8920    0.6091    0.7524    0.6353    0.6610    0.6148    0.6522    0.6100    0.5968    0.6147
+
+  Columns 15 through 17
+
+    0.5761    0.5416    0.6211
+
+Dec 27th: - Ran network with sitstand data in the middle, and normal heatmaps as output (following two extra stacks).
+		- Loss = 0.0021, acc = 69.38%
+
+ans =
+
+  Columns 1 through 14
+
+    0.7800    0.9439    0.9241    0.8871    0.8809    0.5772    0.6854    0.6266    0.6488    0.6461    0.6422    0.5907    0.5965    0.5645
+
+  Columns 15 through 17
+
+    0.5566    0.5283    0.6196
+
+	- Starting run w/o sitstand data in the middle: just normal convolutions and heatmaps. 
+
+Dec 27th: - Ran network with ORIG data in the middle, and normal heatmaps as output (following two extra stacks).
+		- Loss = 0.0021, acc = 71.41%
+
+
+ans =
+
+  Columns 1 through 14
+
+    0.8532    0.9295    0.9346    0.8684    0.9225    0.5796    0.6945    0.6420    0.6478    0.7096    0.6946    0.5531    0.5575    0.6225
+
+  Columns 15 through 17
+
+    0.6020    0.5677    0.6661
+
+            [u'nose',u'left_eye', u'right_eye',u'left_ear', u'right_ear',
+             u'left_shoulder', u'right_shoulder', u'left_elbow', u'right_elbow',
+             u'left_wrist', u'right_wrist', u'left_hip', u'right_hip',
+	u'left_knee', u'right_knee', u'left_ankle', u'right_ankle']
+
+	- "Joint Training of Human Pose and Action Recognition (using Associative Embedding-style Layers)"
+	Conclusions: it IS possible to do joint training, BUT don't get your hopes up that they'll support one another, 
+		because joint training just splits the attention of the loss function. 
+	To-Do: two more runs of each, with and without sitstand layers. 
+	Now: Running 8 hg w/o residual connections to wrap up earlier experiments. 
+	To-Do: find an accuracy measure of the action data. Not enough to just display alternating heatmaps- but use for writeup/poster. 
+	And, that should be it! 
+
+	Poster sections:
+		- Stacked hg arch +associative, pixels discussions; hardware + computational details; joint training results;
+			 modifying stacked hg results; future work (propose pixels to graphs arch); dataset (incl. v-coco description)
+
+
+
+
+CUDA_VISIBLE_DEVICES=0 python mpii.py -a hg --stacks 8 --blocks 1 --checkpoint checkpoint/mpii/hg2_real -j 4
+
+CUDA_VISIBLE_DEVICES=0 python mpii.py -a hg --stacks 8 --blocks 1 --checkpoint checkpoint/mpii/hg2_real --resume checkpoint/mpii/hg2_real/model_best.pth.tar -e 
+
+Jan 1st: - Loss = 0.0005, acc = 0.5746 
+Model,  Head,   Shoulder, Elbow,  Wrist,   Hip ,     Knee  , Ankle ,  Mean
+hg2_real   90.59  84.73     64.16  37.71   72.79   52.77   48.96   64.80
+
+	- Another run of the original PixelsToGraphs run (orig sitstand) initiated. 
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
