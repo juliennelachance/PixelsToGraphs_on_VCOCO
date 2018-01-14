@@ -1,376 +1,161 @@
 from __future__ import print_function, absolute_import
 
 import os
-import argparse
-import time
-import matplotlib.pyplot as plt
+import numpy as np
+import json
+import random
+import math
 
 import torch
-import torch.nn.parallel
-import torch.backends.cudnn as cudnn
-import torch.optim
-import torchvision.datasets as datasets
+import torch.utils.data as data
 
-from pose import Bar
-from pose.utils.logger import Logger, savefig
-from pose.utils.evaluation import accuracy, AverageMeter, final_preds
-from pose.utils.misc import save_checkpoint, save_pred, adjust_learning_rate
-from pose.utils.osutils import mkdir_p, isfile, isdir, join
-from pose.utils.imutils import batch_with_heatmap
-from pose.utils.transforms import fliplr, flip_back
-import pose.models as models
-import pose.datasets as datasets
-
-model_names = sorted(name for name in models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(models.__dict__[name]))
-
-idx = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]
-
-best_acc = 0
+from pose.utils.osutils import *
+from pose.utils.imutils import *
+from pose.utils.transforms import *
 
 
-def main(args):
-    global best_acc
+class Mscoco(data.Dataset):
+    def __init__(self, jsonfile, img_folder, inp_res=256, out_res=64, train=True, sigma=1,
+                 scale_factor=0.25, rot_factor=30, label_type='Gaussian'):
+        self.img_folder = img_folder    # root image folders
+        self.is_train = train           # training set or test set
+        self.inp_res = inp_res
+        self.out_res = out_res
+        self.sigma = sigma
+        self.scale_factor = scale_factor
+        self.rot_factor = rot_factor
+        self.label_type = label_type
 
-    # create checkpoint dir
-    if not isdir(args.checkpoint):
-        mkdir_p(args.checkpoint)
+        # create train/val split
+        with open(jsonfile) as anno_file:   
+            self.anno = json.load(anno_file)
 
-    # create model
-    print("==> creating model '{}', stacks={}, blocks={}".format(args.arch, args.stacks, args.blocks))
-    model = models.__dict__[args.arch](num_stacks=args.stacks, num_blocks=args.blocks, num_classes=args.num_classes)
+        self.train, self.valid = [], []
+        for idx, val in enumerate(self.anno):
+            if val['isValidation'] == True:
+                self.valid.append(idx)
+            else:
+                self.train.append(idx)
+        self.mean, self.std = self._compute_mean()
 
-    model = torch.nn.DataParallel(model).cuda()
-
-    # define loss function (criterion) and optimizer
-    criterion = torch.nn.MSELoss(size_average=True).cuda()
-
-    optimizer = torch.optim.RMSprop(model.parameters(), 
-                                lr=args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
-
-    # optionally resume from a checkpoint
-    title = 'MSCOCO-' + args.arch
-    if args.resume:
-        if isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume)
-            args.start_epoch = checkpoint['epoch']
-            best_acc = checkpoint['best_acc']
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-            logger = Logger(join(args.checkpoint, 'log.txt'), title=title, resume=True)
+    def _compute_mean(self):
+        meanstd_file = './data/mscoco/mean.pth.tar'
+        if isfile(meanstd_file):
+            meanstd = torch.load(meanstd_file)
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
-    else:        
-        logger = Logger(join(args.checkpoint, 'log.txt'), title=title)
-        logger.set_names(['Epoch', 'LR', 'Train Loss', 'Val Loss', 'Train Acc', 'Val Acc'])
-
-    cudnn.benchmark = True
-    print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
-
-    # Data loading code
-    train_loader = torch.utils.data.DataLoader(
-        datasets.Mscoco('data/mscoco/coco_annotations.json', 'data/mscoco/keypoint/images/train2014',
-                        sigma=args.sigma, label_type=args.label_type),
-        batch_size=args.train_batch, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
-    
-    val_loader = torch.utils.data.DataLoader(
-        datasets.Mscoco('data/mscoco/coco_annotations.json', 'data/mscoco/keypoint/images/val2014',
-                        sigma=args.sigma, label_type=args.label_type, train=False),
-        batch_size=args.test_batch, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
-
-
-
-
-
-
-
-    if args.evaluate:
-        print('\nEvaluation only') 
-        loss, acc, predictions = validate(val_loader, model, criterion, args.num_classes, args.debug, args.flip)
-        save_pred(predictions, checkpoint=args.checkpoint)
-        return
-
-    lr = args.lr
-    for epoch in range(args.start_epoch, args.epochs):
-        lr = adjust_learning_rate(optimizer, epoch, lr, args.schedule, args.gamma)
-        print('\nEpoch: %d | LR: %.8f' % (epoch + 1, lr))
-
-        # decay sigma
-        #if args.sigma_decay > 0:
-        #    train_loader.dataset.sigma *=  args.sigma_decay
-        #    val_loader.dataset.sigma *=  args.sigma_decay
-
-        # train for one epoch
-        train_loss, train_acc = train(train_loader, model, criterion, optimizer, args.debug, args.flip)
-
-        # evaluate on validation set
-        valid_loss, valid_acc, predictions = validate(val_loader, model, criterion, args.num_classes,
-                                                      args.debug, args.flip)
-
-        # append logger file
-        logger.append([epoch + 1, lr, train_loss, valid_loss, train_acc, valid_acc])
-
-        # remember best acc and save checkpoint
-        is_best = valid_acc > best_acc
-        best_acc = max(valid_acc, best_acc)
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'arch': args.arch,
-            'state_dict': model.state_dict(),
-            'best_acc': best_acc,
-            'optimizer' : optimizer.state_dict(),
-        }, predictions, is_best, checkpoint=args.checkpoint)
-
-    logger.close()
-    logger.plot(['Train Acc', 'Val Acc'])
-    savefig(os.path.join(args.checkpoint, 'log.eps'))
-
-
-def train(train_loader, model, criterion, optimizer, debug=False, flip=True):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    acces = AverageMeter()
-
-    # switch to train mode
-    model.train()
-
-    end = time.time()
-
-    gt_win, pred_win = None, None
-    bar = Bar('Processing', max=len(train_loader))
-    for i, (inputs, target, target2, meta) in enumerate(train_loader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        input_var = torch.autograd.Variable(inputs.cuda())
-        target_var = torch.autograd.Variable(target.cuda(async=True))
-        target2_var = torch.autograd.Variable(target2.cuda(async=True))
-
-        # compute output
-        output = model(input_var)
-        score_map = output[-1].data.cpu()
-
-        loss = criterion(output[0], target_var)
-        loss += criterion(output[1], target_var)
-        loss += criterion(output[2], target_var)
-        for j in range(3, len(output)):
-            loss += criterion(output[j], target_var)
-        acc = accuracy(score_map, target, idx)
-
-        if debug: # visualize groundtruth and predictions
-            gt_batch_img = batch_with_heatmap(inputs, target)
-            pred_batch_img = batch_with_heatmap(inputs, score_map)
-            if not gt_win or not pred_win:
-                ax1 = plt.subplot(121)
-                ax1.title.set_text('Groundtruth')
-                gt_win = plt.imshow(gt_batch_img)
-                ax2 = plt.subplot(122)
-                ax2.title.set_text('Prediction')
-                pred_win = plt.imshow(pred_batch_img)
-            else:
-                gt_win.set_data(gt_batch_img)
-                pred_win.set_data(pred_batch_img)
-            plt.pause(.05)
-            plt.draw()
-
-        # measure accuracy and record loss
-        losses.update(loss.data[0], inputs.size(0))
-        acces.update(acc[0], inputs.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.6f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | Acc: {acc: .4f}'.format(
-                    batch=i + 1,
-                    size=len(train_loader),
-                    data=data_time.val,
-                    bt=batch_time.val,
-                    total=bar.elapsed_td,
-                    eta=bar.eta_td,
-                    loss=losses.avg,
-                    acc=acces.avg
-                    )
-        bar.next()
-
-    bar.finish()
-    return losses.avg, acces.avg
-
-
-def validate(val_loader, model, criterion, num_classes, debug=False, flip=True):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    acces = AverageMeter()
+            print('==> compute mean')
+            mean = torch.zeros(3)
+            std = torch.zeros(3)
+            cnt = 0
+            for index in self.train:
+                cnt += 1
+                print( '{} | {}'.format(cnt, len(self.train)))
+                a = self.anno[index]
+                img_path = os.path.join(self.img_folder, a['img_paths'])
+                img = load_image(img_path) # CxHxW
+                mean += img.view(img.size(0), -1).mean(1)
+                std += img.view(img.size(0), -1).std(1)
+            mean /= len(self.train)
+            std /= len(self.train)
+            meanstd = {
+                'mean': mean,
+                'std': std,
+                }
+            torch.save(meanstd, meanstd_file)
+        if self.is_train:
+            print('    Mean: %.4f, %.4f, %.4f' % (meanstd['mean'][0], meanstd['mean'][1], meanstd['mean'][2]))
+            print('    Std:  %.4f, %.4f, %.4f' % (meanstd['std'][0], meanstd['std'][1], meanstd['std'][2]))
+            
+        return meanstd['mean'], meanstd['std']
+
+    def __getitem__(self, index):
+        sf = self.scale_factor
+        rf = self.rot_factor
+        if self.is_train:
+            a = self.anno[self.train[index]]
+        else:
+            a = self.anno[self.valid[index]]
+
+        img_path = os.path.join(self.img_folder, a['img_paths'])
+        pts = torch.Tensor(a['joint_self'])
+        # pts[:, 0:2] -= 1  # Convert pts to zero based
+
+        # c = torch.Tensor(a['objpos']) - 1
+        c = torch.Tensor(a['objpos'])
+        s = a['scale_provided']
+
+        sitstand = a['sitstand']
+
+        # Adjust center/scale slightly to avoid cropping limbs
+        if c[0] != -1:
+            c[1] = c[1] + 15 * s
+            s = s * 1.25
+
+        # For single-person pose estimation with a centered/scaled figure
+        nparts = pts.size(0)
+        img = load_image(img_path)  # CxHxW
+
+        r = 0
+        if self.is_train:
+            s = s*torch.randn(1).mul_(sf).add_(1).clamp(1-sf, 1+sf)[0]
+            r = torch.randn(1).mul_(rf).clamp(-2*rf, 2*rf)[0] if random.random() <= 0.6 else 0
+
+            # Flip
+            if random.random() <= 0.5:
+                img = torch.from_numpy(fliplr(img.numpy())).float()
+                pts = shufflelr(pts, width=img.size(2), dataset='mpii')
+                c[0] = img.size(2) - c[0]
+
+            # Color
+            img[0, :, :].mul_(random.uniform(0.8, 1.2)).clamp_(0, 1)
+            img[1, :, :].mul_(random.uniform(0.8, 1.2)).clamp_(0, 1)
+            img[2, :, :].mul_(random.uniform(0.8, 1.2)).clamp_(0, 1)
+
+        # Prepare image and groundtruth map
+        inp = crop(img, c, s, [self.inp_res, self.inp_res], rot=r)
+        inp = color_normalize(inp, self.mean, self.std)
+
+        # Generate ground truth: stacked hg part 
+        tpts = pts.clone()
+        target = torch.zeros(nparts, self.out_res, self.out_res)
+        for i in range(nparts):
+            if tpts[i, 2] > 0: # COCO visible: 0-no label, 1-label + invisible, 2-label + visible
+                tpts[i, 0:2] = to_torch(transform(tpts[i, 0:2]+1, c, s, [self.out_res, self.out_res], rot=r))
+                target[i] = draw_labelmap(target[i], tpts[i]-1, self.sigma, type=self.label_type)
+
+        # Generate ground truth: FC output
+        target2 = torch.zeros(2*nparts, self.out_res, self.out_res)
+        for i in range(nparts):
+            if tpts[i, 2] > 0: # COCO visible: 0-no label, 1-label + invisible, 2-label + visible
+
+                target2[2*i] = target[i]
+                if(sitstand == 0):
+                    # Sit: 
+                    target2[2*i+1] = draw_labelmap_embedding(target2[2*i+1], tpts[i]-1, self.sigma, type=self.label_type, sitstand=0)       
+                else:
+                    # Stand:
+                    target2[2*i+1] = draw_labelmap_embedding(target2[2*i+1], tpts[i]-1, self.sigma, type=self.label_type, sitstand=1)  
+
+
+
+        # Meta info
+        meta = {'index' : index, 'center' : c, 'scale' : s, 
+        'pts' : pts, 'tpts' : tpts, 'sitstand' : sitstand}
+
+        return inp, target, target2, meta
+
+    def __len__(self):
+        if self.is_train:
+            return len(self.train)
+        else:
+            return len(self.valid)
 
-    # predictions
-    predictions = torch.Tensor(val_loader.dataset.__len__(), num_classes, 2)
 
-    # switch to evaluate mode
-    model.eval()
 
-    gt_win, pred_win = None, None
-    end = time.time()
-    bar = Bar('Processing', max=len(val_loader))
-    for i, (inputs, target, target2, meta) in enumerate(val_loader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        target = target.cuda(async=True)
-        target2 = target2.cuda(async=True)
-
-        input_var = torch.autograd.Variable(inputs.cuda(), volatile=True)
-        target_var = torch.autograd.Variable(target, volatile=True)
-        target2_var = torch.autograd.Variable(target2, volatile=True)
-
-        # compute output
-        output = model(input_var)
-        score_map = output[-1].data.cpu()
-
-
-        loss = 0
-        loss = criterion(output[0], target_var)
-        loss += criterion(output[1], target_var)
-        loss += criterion(output[2], target_var)
-        for j in [3,4]:
-            loss += criterion(output[j], target_var)
-        acc = accuracy(score_map, target.cpu(), idx)
-
-
-
-        #f = open('test_file.txt', 'ab')
-        #for i in range(1, len(acc)):
-        #    f.write("%5.2f," % (acc[i]))
-        #f.write("\n")
-        #f.close()
-
-        # generate predictions
-        preds = final_preds(score_map, meta['center'], meta['scale'], [64, 64])
-        for n in range(score_map.size(0)):
-            predictions[meta['index'][n], :, :] = preds[n, :, :]
-
-
-        if debug:
-            gt_batch_img = batch_with_heatmap(inputs, target)
-            pred_batch_img = batch_with_heatmap(inputs, score_map)
-            if not gt_win or not pred_win:
-                plt.subplot(121)
-                gt_win = plt.imshow(gt_batch_img)
-                plt.subplot(122)
-                pred_win = plt.imshow(pred_batch_img)
-            else:
-                gt_win.set_data(gt_batch_img)
-                pred_win.set_data(pred_batch_img)
-            plt.pause(.05)
-            plt.draw()
-
-        # measure accuracy and record loss
-        losses.update(loss.data[0], inputs.size(0))
-        acces.update(acc[0], inputs.size(0))
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.6f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | Acc: {acc: .4f}'.format(
-                    batch=i + 1,
-                    size=len(val_loader),
-                    data=data_time.val,
-                    bt=batch_time.avg,
-                    total=bar.elapsed_td,
-                    eta=bar.eta_td,
-                    loss=losses.avg,
-                    acc=acces.avg
-                    )
-        bar.next()
-
-    bar.finish()
-    return losses.avg, acces.avg, predictions
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-    parser.add_argument('--arch', '-a', metavar='ARCH', default='hg',
-                        choices=model_names,
-                        help='model architecture: ' +
-                            ' | '.join(model_names) +
-                            ' (default: resnet18)')
-    parser.add_argument('--num-classes', default=17, type=int, metavar='N',
-                        help='Number of keypoints')
-    parser.add_argument('-j', '--workers', default=1, type=int, metavar='N',
-                        help='number of data loading workers (default: 4)')
-    parser.add_argument('--epochs', default=90, type=int, metavar='N',
-                        help='number of total epochs to run')
-    parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
-                        help='manual epoch number (useful on restarts)')
-    parser.add_argument('--snapshot', default=0, type=int, metavar='N',
-                        help='How often to take a snapshot of the model (0 = never)')
-    parser.add_argument('--train-batch', default=6, type=int, metavar='N',
-                        help='train batchsize')
-    parser.add_argument('--test-batch', default=6, type=int, metavar='N',
-                        help='test batchsize')
-    parser.add_argument('--lr', '--learning-rate', default=2.5e-4, type=float,
-                        metavar='LR', help='initial learning rate')
-    parser.add_argument('--momentum', default=0, type=float, metavar='M',
-                        help='momentum')
-    parser.add_argument('--weight-decay', '--wd', default=0, type=float,
-                        metavar='W', help='weight decay (default: 0)')
-    parser.add_argument('--schedule', type=int, nargs='+', default=[60, 90],
-                        help='Decrease learning rate at these epochs.')
-    parser.add_argument('--gamma', type=float, default=0.1,
-                        help='LR is multiplied by gamma on schedule.')
-    parser.add_argument('--sigma', type=float, default=1,
-                        help='Sigma to generate Gaussian groundtruth map.')
-    parser.add_argument('--label-type', metavar='LABELTYPE', default='Gaussian',
-                        choices=['Gaussian', 'Cauchy'],
-                        help='Labelmap dist type: (default=Gaussian)')
-    parser.add_argument('--print-freq', '-p', default=10, type=int,
-                        metavar='N', help='print frequency (default: 10)')
-    parser.add_argument('-c', '--checkpoint', default='checkpoint', type=str, metavar='PATH',
-                        help='path to save checkpoint (default: checkpoint)')
-    parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                        help='path to latest checkpoint (default: none)')
-    parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
-                        help='evaluate model on validation set')
-    parser.add_argument('-d', '--debug', dest='debug', action='store_true',
-                        help='show intermediate results')
-    parser.add_argument('-f', '--flip', dest='flip', action='store_true',
-                        help='flip the input during validation')
-    # Model structure
-    parser.add_argument('-s', '--stacks', default=8, type=int, metavar='N',
-                        help='Number of hourglasses to stack')
-    parser.add_argument('--features', default=256, type=int, metavar='N',
-                        help='Number of features in the hourglass')
-    parser.add_argument('-b', '--blocks', default=1, type=int, metavar='N',
-                        help='Number of residual modules at each location in the hourglass')
-
-
-    main(parser.parse_args())
+
+
+
+
+
+
+
